@@ -1,0 +1,1985 @@
+---
+title: "Spatial and Temporal Patterns of U.S. Gun Violence: A Population-Adjusted Analysis"
+author: "Gideon Osei Bonsu"
+editor: visual
+date: today
+format:
+  html:
+    self-contained: true
+    embed-resources: true
+    toc: true
+execute:
+  error: false
+  eval: true
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(skimr)
+library(naniar)
+library(gt)
+library(plotly)
+library(gtExtras)
+library(calendR)
+library(readr)
+
+
+
+```
+
+# Introduction
+
+![](Images/Intro.png){fig-alt="Ask phase banner" width="100%"}
+
+The Gun Violence Archive collected this dataset to document gun violence incidents across the United States and make information about these incidents publicly accessible for research, reporting, and public understanding. This project uses the data to answer a few focused questions:
+
+1.  Where are gun violence incidents geographically concentrated?
+2.  Which states have the highest population-adjusted incident rates over time?
+3.  Are incidents more common in certain months or days of the week?
+4.  Is county poverty rate related to population-adjusted gun violence incident rates?
+5.  Do victim counts differ between weekday and weekend incidents?
+6.  What do the patterns look like in Michigan specifically?
+
+# Data Dictionary
+
+![](Images/Prepare.jpg){fig-alt="Ask phase banner" width="100%"}
+
+This phase is where I load the gun violence data and inspect its structure. The gun violence file contains one row per incident. County/county-equivalent Census data is introduced later in the Process/Clean phase to recover county names, handle county-equivalent geography, and calculate population-adjusted rates.
+
+```{r}
+#| label: read-gun-violence-data
+
+# . Treating common text placeholders as NA for missingness checks.
+
+gun_violence_data <- read_csv(
+  "gun_violence_geo.csv",
+  na = c("", "NA", "N/A", "Unknown", "unknown"),
+  col_types = cols(
+    date = col_datetime(),
+    .default = col_guess()
+  )
+)
+```
+
+```{r}
+#| label: raw-gun-data-glimpse
+
+# Using glimpse to get a summary of the data
+
+glimpse(gun_violence_data)
+```
+
+```{r}
+#| label: raw-gun-data-skim
+
+# Skim for a more compact overview of column types, missingness, and summaries.
+
+skim(gun_violence_data)
+```
+
+## Data Dictionary Table
+
+The table below lists the main variables in the Gun Violence and Census data sets, as well as other derived variables used in the analysis. The Census and rate variables are included because they become important after the gun violence data is joined to county/county-equivalent population data.
+
+```{r}
+#| label: tbl-data-dictionary
+#| tbl-cap: "Data dictionary for selected raw, Census, and derived analysis variables"
+
+data_dictionary <- tibble::tribble(
+  ~variable, ~type, ~description,
+  "geoid", "Character", "County or county-equivalent FIPS identifier used to connect incidents to Census information.",
+  "incident_id", "Character", "Unique Gun Violence Archive identifier for each incident.",
+  "date", "Date", "Date when the incident occurred. The original file stores dates in date-time format, but the time component is not meaningful.",
+  "state", "Character", "U.S. state where the incident occurred.",
+  "city", "Character", "City where the incident occurred.",
+  "county", "Character", "County or county-equivalent where the incident occurred. This field is mostly missing in the raw gun violence file and is recovered using Census GEOID values.",
+  "latitude", "Numeric", "Latitude of the incident location.",
+  "longitude", "Numeric", "Longitude of the incident location.",
+  "number_victims_killed", "Numeric", "Number of victims killed in the incident.",
+  "number_victims_injured", "Numeric", "Number of victims injured in the incident.",
+  "victims_total", "Numeric", "Derived total number of victims killed or injured in an incident.",
+  "incident_characteristics", "Character", "Text description of the incident outcome and additional contextual labels.",
+  "weekend_status", "Categorical", "Derived label identifying whether an incident occurred on a weekday or weekend.",
+  "population", "Numeric", "County/county-equivalent population from the Census data, used as the denominator for rates.",
+  "median_income", "Numeric", "County/county-equivalent median income in dollars from the Census data.",
+  "prop_poverty", "Numeric", "County/county-equivalent poverty proportion from the Census data.",
+  "incident_rate_per_100k", "Numeric", "Derived county/county-equivalent or state incident rate per 100,000 people.",
+  "victim_rate_per_100k", "Numeric", "Derived county/county-equivalent or state victim rate per 100,000 people.",
+  "victim_fatal_incident_rate_per_100k", "Numeric", "Derived county/county-equivalent or state rate of incidents with at least one victim death per 100,000 people."
+)
+
+data_dictionary |>
+  gt() |>
+  cols_label(
+    variable = "Variable",
+    type = "Type",
+    description = "Description"
+  ) |>
+  tab_header(title = "Data Dictionary for Variables Used in the Analysis")
+```
+
+# Data Cleaning
+
+![](Images/process.jpg){fig-alt="Ask phase banner" width="100%"} Here in the Process section, I keep the cleaning focused on what is needed for the subsequent summary tables and visualizations. Identifiers and dates are cleaned, reusable analysis variables are created, missingness is examined, county/county-equivalent names are recovered through the Census data, Connecticut geography is harmonized where needed, and population-adjusted county/county-equivalent and state datasets are constructed.
+
+## Date-time functions
+
+### General Incident-Level Cleaning
+
+The original `date` values are stored in date-time format, but the time component values are all `00:00:00Z`. Because the actual time of day is not accurately recorded, I am converting `date` into a date-only variable before creating year, month, quarter, weekday, and weekend variables for later analysis.
+
+I am transforming geoid and incident_id into character columns because they are identifiers, not quantities. The `geoid` variable is used later to recover county names and join the gun violence data to county/county-equivalent Census data. Some county FIPS codes have leading zeroes, so I'm storing `geoid` as a five-character string to avoid errors later on.
+
+The dataset stores killed and injured victims separately. For later summary tables and visualizations, I create total victim counts and simple categorical variables describing incident severity.
+
+```{r}
+#| label: clean-gun-incident-data
+
+# Keeping this cleaning general and reusable. More specific filtering is done later
+# immediately before each table or visualization.
+
+gun_incidents <- gun_violence_data |>
+  mutate(
+    incident_id = as.character(incident_id),
+    geoid = as.character(geoid),
+    geoid = str_pad(geoid, width = 5, side = "left", pad = "0"),
+    date = as_date(date),
+    year = year(date),
+    month = month(date),
+    month_name = month(date, label = TRUE, abbr = FALSE),
+    quarter = quarter(date),
+    weekday = wday(date, label = TRUE, abbr = FALSE, week_start = 1),
+    weekend_status = if_else(
+      as.character(weekday) %in% c("Saturday", "Sunday"),
+      "Weekend",
+      "Weekday"
+    ),
+    state = str_squish(state),
+    city = str_squish(city),
+    business_or_school = str_squish(business_or_school),
+    address = str_squish(address),
+    victims_total = number_victims_killed + number_victims_injured,
+    suspects_killed_injured_arrested = number_suspects_killed +
+      number_suspects_injured +
+      number_suspects_arrested,
+    victim_fatal_incident = if_else(
+      number_victims_killed > 0,
+      "Victim-fatal incident",
+      "No victim death recorded"
+    ),
+    victim_severity = case_when(
+      victims_total == 0 ~ "No victims recorded",
+      number_victims_killed > 0 & number_victims_injured > 0 ~ "Victim death and injury",
+      number_victims_killed > 0 ~ "Victim death(s)",
+      number_victims_injured > 0 ~ "Injury victim(s)",
+      TRUE ~ "Other/unclear"
+    ),
+    weekend_status = factor(weekend_status, levels = c("Weekday", "Weekend")),
+    victim_fatal_incident = factor(
+      victim_fatal_incident,
+      levels = c("No victim death recorded", "Victim-fatal incident")
+    ),
+    victim_severity = factor(
+      victim_severity,
+      levels = c(
+        "No victims recorded",
+        "Injury victim(s)",
+        "Victim death(s)",
+        "Victim death and injury",
+        "Other/unclear"
+      )
+    )
+  )
+```
+
+## String Manipulation
+
+The first parts of values in the `incident_characteristics` column describe the main outcome, while subsequent parts of each entry add extra context for some rows. I am separating the two pieces into a cleaner variable for the main outcome and a separate text field for additional incident context for later analysis.
+
+```{r}
+#| label: separate-incident-characteristics
+
+gun_incidents <- gun_incidents |>
+  mutate(
+    primary_incident_outcome = incident_characteristics |>
+      str_extract("^[^\r\n]+") |>
+      str_squish() |>
+      na_if(""),
+    additional_incident_context = if_else(
+      !is.na(incident_characteristics) & str_detect(incident_characteristics, "\\r?\\n"),
+      incident_characteristics |>
+        str_replace("^[^\r\n]+\\r?\\n", "") |>
+        str_replace_all("\\r?\\n", "; ") |>
+        str_squish(),
+      NA_character_
+    ),
+    additional_incident_context = na_if(additional_incident_context, "")
+  )
+```
+
+## Missingness Analysis
+
+Missingness is examined before joining datasets because missing values can affect which records can be used for maps, county/county-equivalent rates, and context-based visualizations.
+
+```{r}
+#| label: tbl-missingness-summary
+#| tbl-cap: "Missingness summary for the cleaned incident-level gun violence dataset"
+
+missingness_summary <- gun_incidents |>
+  naniar::miss_var_summary() |>
+  mutate(pct_miss = round(pct_miss, 2))
+
+missingness_summary |>
+  slice_head(n = 20) |>
+  gt() |>
+  cols_label(
+    variable = "Variable",
+    n_miss = "Missing Count",
+    pct_miss = "Missing Percent"
+  ) |>
+  tab_header(title = "Top Missingness Counts in the Gun Violence Dataset") |>
+   gt_theme_espn()
+```
+
+```{r}
+#| label: missingness-variable-plot
+
+# This plot shows missing values by variable using the full dataset.
+
+gun_incidents |>
+  select(
+    geoid,
+    date,
+    state,
+    city,
+    county,
+    business_or_school,
+    address,
+    latitude,
+    longitude,
+    incident_characteristics
+  ) |>
+  naniar::gg_miss_var(show_pct = TRUE) +
+  labs(
+    title = "Missingness by Key Gun Violence Variable",
+    y = "Percentage of missing values",
+    caption = "Data Sources: Gun Violence Archive and 2009-2023 County Census Data"
+  ) +
+  theme_minimal() 
+```
+
+The `county` column values are almost 100% missing. Rather than removing these incident records, I will use the `geoid` column to recover county names from the U.S. Census County (2009-2023) data, which also has `geoid`. This preserves most incident records while making county/county-equivalent analysis possible.
+
+## Basic Identifier Checks
+
+The `incident_id` variable should identify individual incidents. Duplicated IDs and negative IDs are checked before the data is used for analysis.
+
+```{r}
+#| label: incident-id-checks
+
+duplicate_id_position <- anyDuplicated(gun_incidents$incident_id)
+negative_id_exists <- any(as.numeric(gun_incidents$incident_id) < 0, na.rm = TRUE)
+
+cat("Duplicate incident ID check:", duplicate_id_position, "\n")
+cat("Negative incident ID check:", negative_id_exists, "\n")
+```
+
+## Merging Datasets
+
+Here is where I merge the Gun Violence Archive dataset with the U.S. Census County Data 2009-2023 data primarily to recover county/county-equivalent names using `geoid`, and secondly, to calculate population-adjusted incident rates. Only the columns needed for the visualizations and statistical analysis are retained.
+
+```{r}
+#| label: read-clean-census-data
+
+census_data <- read_csv(
+  "census_data_county_2009-2023.csv",
+  col_types = cols(
+    geoid = col_character(),
+    county_state = col_character(),
+    year = col_integer(),
+    population = col_double(),
+    median_income = col_double(),
+    prop_poverty = col_double(),
+    .default = col_guess()
+  )
+) |>
+#Since the Census data goes all the way back to 2009, I filter so only data starting
+#from 2014 (the year the gun violence data collection started) are considered.
+  filter(year >= min(gun_incidents$year, na.rm = TRUE)) |>
+  transmute(
+    geoid = str_pad(geoid, width = 5, side = "left", pad = "0"),
+    year,
+    county_state = str_squish(county_state),
+    county_from_census = str_squish(str_remove(county_state, ",\\s*.+$")),
+    state_from_census = str_squish(str_remove(county_state, "^.*,\\s*")),
+    population,
+    median_income,
+    prop_poverty
+  ) |>
+  distinct(geoid, year, .keep_all = TRUE)
+
+glimpse(census_data)
+```
+
+Connecticut needs one additional geography step before the county/county-equivalent join. Connecticut's eight legacy counties stopped functioning administratively in 1960, and the U.S. Census Bureau later adopted the state's nine planning regions as county-equivalent units for Census-related products. The Census Bureau's Federal Register notice explains this change here: [Change to County-Equivalents in the State of Connecticut](https://www.federalregister.gov/documents/2022/06/06/2022-12063/change-to-county-equivalents-in-the-state-of-connecticut){target="_blank" rel="noopener"}.
+
+In this project, the Census file uses planning-region GEOIDs for Connecticut in 2022 and 2023, while the gun violence incident dataset still stores those incidents under the older county GEOIDs. To avoid losing available Connecticut incidents, I harmonize Connecticut 2022-2023 records by mapping the recorded incident city or town (from the gun violence dataset) to its planning region before creating county/county-equivalent rates. The lookup table is written directly in the QMD because it is a small, project-specific reference table that covers only the Connecticut city/place names appearing in the 2022-2023 gun violence incident data. This preserves the incident records, but it also means the Connecticut 2022-2023 county-equivalent rates depend on the accuracy and consistency of the city field in the incident data.
+
+```{r}
+#| label: harmonize-connecticut-planning-regions
+
+# Connecticut 2022-2023 records need to use planning-region GEOIDs because
+# those are the county-equivalent units in the Census file for those years.
+# The lookup below covers only Connecticut cities/towns that appear in the
+# incident data for 2022 and 2023.
+
+ct_city_planning_region_lookup <- tibble::tribble(
+  ~city, ~ct_planning_region_geoid, ~ct_planning_region_name,
+  "Ansonia", "09140", "Naugatuck Valley Planning Region",
+  "Bethel", "09190", "Western Connecticut Planning Region",
+  "Bloomfield", "09110", "Capitol Planning Region",
+  "Branford", "09170", "South Central Connecticut Planning Region",
+  "Bridgeport", "09120", "Greater Bridgeport Planning Region",
+  "Bristol", "09140", "Naugatuck Valley Planning Region",
+  "Brooklyn", "09150", "Northeastern Connecticut Planning Region",
+  "Cromwell", "09130", "Lower Connecticut River Valley Planning Region",
+  "Danbury", "09190", "Western Connecticut Planning Region",
+  "Darien", "09190", "Western Connecticut Planning Region",
+  "Dayville", "09150", "Northeastern Connecticut Planning Region",
+  "East Granby", "09110", "Capitol Planning Region",
+  "East Hartford", "09110", "Capitol Planning Region",
+  "East Haven", "09170", "South Central Connecticut Planning Region",
+  "East Windsor", "09110", "Capitol Planning Region",
+  "Enfield", "09110", "Capitol Planning Region",
+  "Fairfield", "09120", "Greater Bridgeport Planning Region",
+  "Guilford", "09170", "South Central Connecticut Planning Region",
+  "Hamden", "09170", "South Central Connecticut Planning Region",
+  "Hartford", "09110", "Capitol Planning Region",
+  "Hebron", "09110", "Capitol Planning Region",
+  "Ledyard", "09180", "Southeastern Connecticut Planning Region",
+  "Manchester", "09110", "Capitol Planning Region",
+  "Mansfield", "09110", "Capitol Planning Region",
+  "Meriden", "09170", "South Central Connecticut Planning Region",
+  "Middlebury", "09140", "Naugatuck Valley Planning Region",
+  "Middletown", "09130", "Lower Connecticut River Valley Planning Region",
+  "Milford", "09170", "South Central Connecticut Planning Region",
+  "Naugatuck", "09140", "Naugatuck Valley Planning Region",
+  "New Britain", "09110", "Capitol Planning Region",
+  "New Fairfield", "09190", "Western Connecticut Planning Region",
+  "New Hartford", "09160", "Northwest Hills Planning Region",
+  "New Haven", "09170", "South Central Connecticut Planning Region",
+  "New London", "09180", "Southeastern Connecticut Planning Region",
+  "Newington", "09110", "Capitol Planning Region",
+  "Newtown", "09190", "Western Connecticut Planning Region",
+  "Norwalk", "09190", "Western Connecticut Planning Region",
+  "Norwich", "09180", "Southeastern Connecticut Planning Region",
+  "Old Lyme", "09130", "Lower Connecticut River Valley Planning Region",
+  "Plainfield", "09150", "Northeastern Connecticut Planning Region",
+  "Plainville", "09110", "Capitol Planning Region",
+  "Plymouth", "09140", "Naugatuck Valley Planning Region",
+  "Prospect", "09140", "Naugatuck Valley Planning Region",
+  "Seymour", "09140", "Naugatuck Valley Planning Region",
+  "Shelton", "09140", "Naugatuck Valley Planning Region",
+  "South Windsor", "09110", "Capitol Planning Region",
+  "Southington", "09110", "Capitol Planning Region",
+  "Southport", "09120", "Greater Bridgeport Planning Region",
+  "Stamford", "09190", "Western Connecticut Planning Region",
+  "Stonington", "09180", "Southeastern Connecticut Planning Region",
+  "Stratford", "09120", "Greater Bridgeport Planning Region",
+  "Thomaston", "09140", "Naugatuck Valley Planning Region",
+  "Torrington", "09160", "Northwest Hills Planning Region",
+  "Trumbull", "09120", "Greater Bridgeport Planning Region",
+  "Unionville", "09110", "Capitol Planning Region",
+  "Vernon", "09110", "Capitol Planning Region",
+  "Wallingford", "09170", "South Central Connecticut Planning Region",
+  "Waterbury", "09140", "Naugatuck Valley Planning Region",
+  "Watertown", "09140", "Naugatuck Valley Planning Region",
+  "West Hartford", "09110", "Capitol Planning Region",
+  "West Haven", "09170", "South Central Connecticut Planning Region",
+  "Wethersfield", "09110", "Capitol Planning Region",
+  "Willimantic", "09180", "Southeastern Connecticut Planning Region",
+  "Windham", "09180", "Southeastern Connecticut Planning Region",
+  "Windsor", "09110", "Capitol Planning Region",
+  "Wolcott", "09140", "Naugatuck Valley Planning Region",
+  "Woodbridge", "09170", "South Central Connecticut Planning Region"
+)
+
+gun_incidents <- gun_incidents |>
+  mutate(original_geoid = geoid) |>
+  left_join(ct_city_planning_region_lookup, by = "city") |>
+  mutate(
+    ct_geography_needs_harmonization = coalesce(
+      state == "Connecticut" & year %in% c(2022, 2023),
+      FALSE
+    ),
+    ct_geography_harmonized = ct_geography_needs_harmonization &
+      !is.na(ct_planning_region_geoid),
+    geoid = if_else(
+      ct_geography_harmonized,
+      ct_planning_region_geoid,
+      geoid
+    )
+  )
+
+ct_harmonization_check <- gun_incidents |>
+  filter(ct_geography_needs_harmonization) |>
+  summarise(
+    ct_records_2022_2023 = n(),
+    records_with_city = sum(!is.na(city) & city != ""),
+    records_mapped_to_planning_region = sum(ct_geography_harmonized, na.rm = TRUE),
+    records_not_mapped = ct_records_2022_2023 - records_mapped_to_planning_region,
+    percent_mapped = records_mapped_to_planning_region / ct_records_2022_2023
+  )
+
+ct_harmonization_check |>
+  gt() |>
+  fmt_percent(columns = percent_mapped, decimals = 1) |>
+  cols_label(
+    ct_records_2022_2023 = "CT Records, 2022-2023",
+    records_with_city = "Records With City",
+    records_mapped_to_planning_region = "Mapped to Planning Region",
+    records_not_mapped = "Not Mapped",
+    percent_mapped = "Percent Mapped"
+  ) |>
+  tab_header(title = "Connecticut 2022-2023 Planning Region Harmonization Check") |>
+  gt_theme_espn()
+```
+
+```{r}
+#| label: tbl-county-recovery-check
+#| tbl-cap: "County/county-equivalent recovery check after joining incident GEOIDs to Census names"
+
+# The original county column is almost entirely missing. Since GEOID identifies
+# the county or county-equivalent, the Census data is used as a lookup table
+# to recover county/county-equivalent names. Rows with missing GEOID cannot
+# be recovered this way and are kept for incident-level analysis, but they
+# will not be usable in population-adjusted county/county-equivalent rates.
+
+county_lookup <- census_data |>
+  distinct(geoid, county_from_census)
+
+gun_incidents <- gun_incidents |>
+  select(-county) |>
+  left_join(county_lookup, by = "geoid") |>
+  rename(county = county_from_census)
+
+gun_incidents |>
+  summarise(
+    total_rows = n(),
+    missing_geoid = sum(is.na(geoid)),
+    missing_county_after_fill = sum(is.na(county)),
+    percent_missing_county_after_fill = round(mean(is.na(county)) * 100, 2)
+  ) |>
+  gt() |>
+  cols_label(
+    total_rows = "Total Rows",
+    missing_geoid = "Missing GEOID",
+    missing_county_after_fill = "Missing County/Equivalent After Fill",
+    percent_missing_county_after_fill = "Percent Missing County/Equivalent"
+  ) |>
+  tab_header(title = "County/County-Equivalent Recovery Check After Census Lookup") |>
+   gt_theme_espn()
+```
+
+```{r}
+#| label: create-county-year-summary
+
+# Aggregate the incident-level data to county/county-equivalent-year level before calculating rates.
+# Rates are calculated after counting incidents within each county/county-equivalent and year, not
+# from individual incident rows.
+
+gun_county_year_summary <- gun_incidents |>
+  filter(!is.na(geoid)) |>
+  group_by(geoid, county, state, year) |>
+  summarise(
+    incident_count = n(),
+    victims_killed = sum(number_victims_killed, na.rm = TRUE),
+    victims_injured = sum(number_victims_injured, na.rm = TRUE),
+    victims_total = sum(victims_total, na.rm = TRUE),
+    victim_fatal_incident_count = sum(number_victims_killed > 0, na.rm = TRUE),
+    injury_incident_count = sum(number_victims_injured > 0, na.rm = TRUE),
+    four_or_more_victims_count = sum(victims_total >= 4, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gun_county_year_summary |>
+  slice_head(n = 10)
+```
+
+```{r}
+#| label: join-county-year-census
+
+# Join by both geoid and year. This prevents a county's gun violence data from 
+# being matched to Census population and poverty values from the wrong year.
+
+gun_county_year_rates <- gun_county_year_summary |>
+  left_join(
+    census_data |>
+      select(
+        geoid,
+        year,
+        population,
+        median_income,
+        prop_poverty
+      ),
+    by = c("geoid", "year")
+  ) |>
+  mutate(
+    incident_rate_per_100k = incident_count / population * 100000,
+    victim_rate_per_100k = victims_total / population * 100000,
+    victim_fatal_incident_rate_per_100k = victim_fatal_incident_count / population * 100000
+  )
+
+glimpse(gun_county_year_rates)
+```
+
+```{r}
+#| label: tbl-join-quality-check
+#| tbl-cap: "Join quality check after matching gun violence county/county-equivalent-year summaries to Census population values"
+#Join data quality checks
+joined_rate_missingness <- gun_county_year_rates |>
+  summarise(
+    county_year_rows = n(),
+    earliest_year = min(year, na.rm = TRUE),
+    latest_year = max(year, na.rm = TRUE),
+    rows_missing_population = sum(is.na(population)),
+    percent_missing_population = round(mean(is.na(population)) * 100, 2),
+    rows_with_population = sum(!is.na(population))
+  )
+
+joined_rate_missingness |>
+  gt() |>
+  cols_label(
+    county_year_rows = "County/Equivalent-Year Rows",
+    earliest_year = "Earliest Year",
+    latest_year = "Latest Year",
+    rows_missing_population = "Rows Missing Population",
+    percent_missing_population = "Percent Missing Population",
+    rows_with_population = "Rows With Population"
+  ) |>
+  tab_header(title = "Join Quality Check for County/County-Equivalent-Year Rate Dataset") |>
+   gt_theme_espn()
+```
+
+The join quality check shows `r joined_rate_missingness$rows_missing_population` rows with no population data after merging, which represents `r joined_rate_missingness$percent_missing_population`% of the joined county/county-equivalent-year rows. I will now try to figure out why they are missing.
+
+```{r}
+#| label: tbl-missing-population-by-year
+#| tbl-cap: "County/county-equivalent-year rows with missing Census population values after the join"
+# This identifies which years are responsible for missing population values
+# after the county/county-equivalent-year Census join.
+missing_population_by_year <- gun_county_year_rates |>
+  filter(is.na(population)) |>
+  count(year, name = "rows_missing_population")
+
+missing_population_by_year |>
+  gt() |>
+  cols_label(
+    year = "Year",
+    rows_missing_population = "Rows Missing Population"
+  ) |>
+  tab_header(title = "Missing Population Rows by Year After Census Join") |>
+   gt_theme_espn()
+```
+
+The missing population values in the joined county/county-equivalent-year dataset seem to not fit into the usual random missingness categories such as MCAR, MAR, or MNAR. In this case, the missing values were created during the join because some county/county-equivalent-year records in the gun violence summary did not have a matching county/county-equivalent-year record in the Census dataset.
+
+Therefore, I conclude that this is best described as **structural missingness**. The missingness mostly reflects the structure and coverage of the Census dataset, especially the absence of 2020 county/county-equivalent records from the uploaded Census file, rather than random missingness within the gun violence data itself. One natural question is whether this could be down to the pandemic's disruptions, but this project does not verify the reason from the file alone. Since population is required to calculate rates per 100,000 people, these rows are removed only from the population-adjusted rate analysis dataset.
+
+```{r}
+#| label: create-rate-analysis-dataset
+
+# This dataset will be used for county/county-equivalent population-adjusted analysis. It starts
+# from Census county/county-equivalent-year records so counties with zero recorded incidents remain in
+# the analysis with incident counts set to 0.
+
+county_year_incident_counts <- gun_county_year_summary |>
+  group_by(geoid, year) |>
+  summarise(
+    incident_count = sum(incident_count, na.rm = TRUE),
+    victims_killed = sum(victims_killed, na.rm = TRUE),
+    victims_injured = sum(victims_injured, na.rm = TRUE),
+    victims_total = sum(victims_total, na.rm = TRUE),
+    victim_fatal_incident_count = sum(victim_fatal_incident_count, na.rm = TRUE),
+    injury_incident_count = sum(injury_incident_count, na.rm = TRUE),
+    four_or_more_victims_count = sum(four_or_more_victims_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gun_county_year_rates_for_analysis <- census_data |>
+  transmute(
+    geoid,
+    year,
+    county = county_from_census,
+    state = state_from_census,
+    population,
+    median_income,
+    prop_poverty
+  ) |>
+  filter(state %in% unique(gun_incidents$state[!is.na(gun_incidents$state)])) |>
+  left_join(county_year_incident_counts, by = c("geoid", "year")) |>
+  mutate(
+    across(
+      c(
+        incident_count,
+        victims_killed,
+        victims_injured,
+        victims_total,
+        victim_fatal_incident_count,
+        injury_incident_count,
+        four_or_more_victims_count
+      ),
+      ~ replace_na(.x, 0)
+    ),
+    incident_rate_per_100k = incident_count / population * 100000,
+    victim_rate_per_100k = victims_total / population * 100000,
+    victim_fatal_incident_rate_per_100k = victim_fatal_incident_count / population * 100000
+  ) |>
+  filter(!is.na(population), population > 0)
+```
+
+```{r}
+#| label: create-state-year-rate-data
+
+# State-level rates are calculated with full state-year population denominators.
+# Incident counts are first summarized by state and year, while state population,
+# median income, and poverty are calculated from all Census counties in each state.
+
+census_state_year <- census_data |>
+  group_by(state = state_from_census, year) |>
+  summarise(
+    state_population = sum(population, na.rm = TRUE),
+    median_income = {
+      valid_income <- !is.na(median_income) & !is.na(population) & population > 0
+      if (any(valid_income)) {
+        weighted.mean(median_income[valid_income], population[valid_income])
+      } else {
+        NA_real_
+      }
+    },
+    prop_poverty = {
+      valid_poverty <- !is.na(prop_poverty) & !is.na(population) & population > 0
+      if (any(valid_poverty)) {
+        weighted.mean(prop_poverty[valid_poverty], population[valid_poverty])
+      } else {
+        NA_real_
+      }
+    },
+    .groups = "drop"
+  )
+
+state_incident_counts <- gun_incidents |>
+  filter(!is.na(state), !is.na(year)) |>
+  group_by(state, year) |>
+  summarise(
+    incident_count = n(),
+    victims_killed = sum(number_victims_killed, na.rm = TRUE),
+    victims_injured = sum(number_victims_injured, na.rm = TRUE),
+    victims_total = sum(victims_total, na.rm = TRUE),
+    victim_fatal_incident_count = sum(number_victims_killed > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gun_state_year_rates <- state_incident_counts |>
+  left_join(census_state_year, by = c("state", "year")) |>
+  filter(!is.na(state_population), state_population > 0) |>
+  mutate(
+    incident_rate_per_100k = incident_count / state_population * 100000,
+    victim_rate_per_100k = victims_total / state_population * 100000,
+    victim_fatal_incident_rate_per_100k = victim_fatal_incident_count / state_population * 100000
+  )
+
+glimpse(gun_state_year_rates)
+```
+
+# Exploratory Data Analysis
+
+## ![](Images/Analyze.jpg){fig-alt="Ask phase banner" width="100%"} Tables of Summary Statistics
+
+The visualizations below are paired with summary tables. Each table appears immediately before its related visualization so that the descriptive statistics and visual pattern can be interpreted together. When geographic areas are compared, I use population-adjusted rates rather than raw totals. In this report, `incident_rate_per_100k` means the number of recorded gun violence incidents per 100,000 residents.
+
+## Data Visualizations
+
+### Visualization 1: State-Year Trend Line
+
+For this visualization, I use the `gun_state_year_rates` data summarized in the [table](#tbl-state-trend-selected-states) below. This [table](#tbl-state-trend-selected-states) summarizes incidents at the state-year level and includes population-adjusted incident, victim, and victim-fatal incident rates calculated with full state-year population totals from the Census county/county-equivalent data. I select the eight states/jurisdictions with the highest average `incident_rate_per_100k` so that the chart focuses on the most prominent rate patterns without crowding the display.
+
+```{r}
+#| label: tbl-state-trend-selected-states
+#| tbl-cap: "Summary statistics for states/jurisdictions selected for the population-adjusted trend line chart"
+
+# The gun_state_year_rates table is already aggregated to one row per state and year.
+# incident_rate_per_100k represents recorded gun violence incidents per 100,000 residents.
+# I summarize the rate across years to select the eight states with the highest
+# average population-adjusted incident rates.
+
+selected_states_summary <- gun_state_year_rates |>
+  group_by(state) |>
+  summarise(
+    average_incident_rate = mean(incident_rate_per_100k, na.rm = TRUE),
+    minimum_incident_rate = min(incident_rate_per_100k, na.rm = TRUE),
+    maximum_incident_rate = max(incident_rate_per_100k, na.rm = TRUE),
+    years_available = n_distinct(year),
+    .groups = "drop"
+  ) |>
+  slice_max(average_incident_rate, n = 8) |>
+  arrange(desc(average_incident_rate))
+
+# Store the selected state names so that the same states are used in the trend chart.
+
+selected_states <- selected_states_summary |>
+  pull(state)
+
+# Keep only the selected high-rate states for the line chart.
+
+state_trend_data <- gun_state_year_rates |>
+  filter(state %in% selected_states)
+
+selected_states_summary |>
+  gt() |>
+  fmt_number(
+    columns = c(
+      average_incident_rate,
+      minimum_incident_rate,
+      maximum_incident_rate
+    ),
+    decimals = 2
+  ) |>
+  cols_label(
+    state = "State/Jurisdiction",
+    average_incident_rate = "Average Incident Rate per 100,000 Residents",
+    minimum_incident_rate = "Minimum Incident Rate per 100,000 Residents",
+    maximum_incident_rate = "Maximum Incident Rate per 100,000 Residents",
+    years_available = "Years Available"
+  ) |>
+  tab_header(
+    title = "Selected States/Jurisdictions for Population-Adjusted Incident Rate Trend Analysis"
+  ) |>
+  gt_theme_espn()
+```
+
+```{r}
+#| label: viz-1-state-year-trend-line
+
+# This line chart shows how population-adjusted incident rates changed over time
+# for the eight states/jurisdictions with the highest average incident rates. The legend is
+# placed at the bottom to keep the plot area clear.
+
+ggplot(
+  state_trend_data,
+  aes(
+    x = year,
+    y = incident_rate_per_100k,
+    color = state,
+    group = state
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_viridis_d(option = "D", end = 0.9) +
+  scale_x_continuous(
+    breaks = sort(unique(state_trend_data$year))
+  ) +
+  labs(
+    title = "Gun Violence Incident Rates Over Time in High-Rate States",
+    subtitle = stringr::str_wrap(
+      "Rates are population-adjusted and reported per 100,000 residents; 2020 is excluded because the Census file has no 2020 records",
+      width = 85
+    ),
+    x = "Year",
+    y = "Incidents per 100,000 residents",
+    color = "State/Jurisdiction",
+    caption = "Data Source: Gun Violence Archive and U.S. Census county/county-equivalent data"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold",hjust = 0.9),
+    plot.subtitle = element_text(lineheight = 1.1, margin = margin(b = 8)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 1),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(5.5, 15, 24, 5.5)
+  )
+```
+
+`r selected_states_summary$state[1]` has the highest average incident rate among the selected states/jurisdictions at `r round(selected_states_summary$average_incident_rate[1], 2)` incidents per 100,000 residents. `r selected_states_summary$state[2]` and `r selected_states_summary$state[3]` also remain consistently high, averaging `r round(selected_states_summary$average_incident_rate[2], 2)` and `r round(selected_states_summary$average_incident_rate[3], 2)` incidents per 100,000 residents, respectively. Several selected states/jurisdictions have higher rates in 2023 than in 2014, showing that the population-adjusted burden increased over time in multiple high-rate states.
+
+### Visualization 2: Heatmap of Incidents by Month and Weekday
+
+This heatmap uses the incident-level `gun_incidents` data, summarized in the [table](#tbl-month-weekday-incidents) below, and two date variables created during cleaning: `month_name` and `weekday`. The values shown are raw incident counts because this visualization examines timing patterns rather than comparing geographic areas with different population sizes.
+
+```{r}
+#| label: tbl-month-weekday-incidents
+#| tbl-cap: "Cross-tabulated frequency table of incidents by month and weekday"
+
+# Count incidents across two categorical time variables: month and weekday.
+# This table supports the heatmap and satisfies the requirement to summarize
+# a cross-section of two categorical variables.
+
+month_weekday_incidents <- gun_incidents |>
+  count(month_name, weekday, name = "incident_count")
+
+month_weekday_frequency_table <- month_weekday_incidents |>
+  pivot_wider(
+    names_from = weekday,
+    values_from = incident_count,
+    values_fill = 0
+  ) |>
+  arrange(month_name)
+
+weekday_incident_totals <- month_weekday_incidents |>
+  group_by(weekday) |>
+  summarise(
+    total_incidents = sum(incident_count),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total_incidents))
+
+top_weekday <- weekday_incident_totals |> slice(1)
+second_weekday <- weekday_incident_totals |> slice(2)
+
+top_month_weekday <- month_weekday_incidents |>
+  slice_max(incident_count, n = 1, with_ties = FALSE)
+
+month_weekday_frequency_table |>
+  gt() |>
+  cols_label(month_name = "Month") |>
+  tab_header(title = "Incident Frequency Table by Month and Weekday") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-2-month-weekday-heatmap
+
+# This heatmap uses fill color to show the number of incidents for each
+# month-weekday combination. The closer a  higher incident counts.
+
+ggplot(
+  month_weekday_incidents,
+  aes(
+    x = weekday,
+    y = month_name,
+    fill = incident_count
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_viridis_c(
+    direction = -1,
+    labels = scales::label_number()
+  ) +
+  labs(
+    title = "Gun Violence Incidents by Month and Day of Week",
+    subtitle = "Darker cells represent higher incident counts",
+    x = "Day of Week",
+    y = "Month",
+    fill = "Incident Count",
+    caption = "Data Source: Gun Violence Archive"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.caption = element_text(hjust = 1)
+  )
+```
+
+The heatmap shows that incidents are most concentrated on weekends. `r as.character(top_weekday$weekday)` has the highest overall count with `r scales::comma(top_weekday$total_incidents)` incidents, followed by `r as.character(second_weekday$weekday)` with `r scales::comma(second_weekday$total_incidents)` incidents. The largest single month-weekday combination is `r as.character(top_month_weekday$month_name)` `r as.character(top_month_weekday$weekday)`, with `r scales::comma(top_month_weekday$incident_count)` incidents, which suggests that both seasonality and day of the week matter in the timing of recorded incidents.
+
+### Visualization 3: Weekday vs. Weekend Victim Severity
+
+The heatmap answers when incidents are most common. This next visualization adds a severity layer by comparing weekday and weekend incidents using victim counts. I use `weekend_status` as the grouping variable and compare both average victims per incident and the share of incidents in each victim severity category.
+
+```{r}
+#| label: tbl-weekday-weekend-victim-severity
+#| tbl-cap: "Victim severity summary for weekday and weekend incidents"
+
+# This table compares weekday and weekend incidents using counts, averages, and
+# percentage-based severity measures. Percentages are useful here because there
+# are more weekdays than weekend days in a week.
+
+weekend_victim_summary <- gun_incidents |>
+  group_by(weekend_status) |>
+  summarise(
+    incidents = n(),
+    total_victims = sum(victims_total, na.rm = TRUE),
+    average_victims_per_incident = mean(victims_total, na.rm = TRUE),
+    average_victims_killed = mean(number_victims_killed, na.rm = TRUE),
+    average_victims_injured = mean(number_victims_injured, na.rm = TRUE),
+    multi_victim_incident_share = mean(victims_total > 1, na.rm = TRUE),
+    victim_fatal_incident_share = mean(number_victims_killed > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+victim_severity_by_weekend <- gun_incidents |>
+  count(weekend_status, victim_severity, name = "incident_count") |>
+  group_by(weekend_status) |>
+  mutate(
+    severity_share = incident_count / sum(incident_count)
+  ) |>
+  ungroup()
+
+weekend_victim_summary |>
+  gt() |>
+  fmt_number(
+    columns = c(
+      incidents,
+      total_victims
+    ),
+    decimals = 0,
+    use_seps = TRUE
+  ) |>
+  fmt_number(
+    columns = c(
+      average_victims_per_incident,
+      average_victims_killed,
+      average_victims_injured
+    ),
+    decimals = 2
+  ) |>
+  fmt_percent(
+    columns = c(
+      multi_victim_incident_share,
+      victim_fatal_incident_share
+    ),
+    decimals = 1
+  ) |>
+  cols_label(
+    weekend_status = "Weekday/Weekend Status",
+    incidents = "Incidents",
+    total_victims = "Total Victims",
+    average_victims_per_incident = "Average Victims per Incident",
+    average_victims_killed = "Average Victims Killed",
+    average_victims_injured = "Average Victims Injured",
+    multi_victim_incident_share = "Multi-Victim Incident Share",
+    victim_fatal_incident_share = "Victim-Fatal Incident Share"
+  ) |>
+  tab_header(title = "Weekday and Weekend Victim Severity Comparison") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-3-weekday-weekend-victim-severity
+
+# This bar chart compares the composition of victim severity categories within
+# weekday and weekend incidents. Shares are used instead of raw counts so the
+# groups can be compared fairly.
+
+ggplot(
+  victim_severity_by_weekend,
+  aes(
+    x = victim_severity,
+    y = severity_share,
+    fill = weekend_status
+  )
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_viridis_d(option = "D", end = 0.85) +
+  labs(
+    title = "Victim Severity Composition by Weekday and Weekend Status",
+    subtitle = "Severity Share Within Weekday and Weekend Incidents",
+    x = "Victim severity category",
+    y = "Share of incidents",
+    fill = NULL,
+    caption = "Data Source: Gun Violence Archive"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust=1),
+    plot.subtitle = element_text(hjust=0.8),
+    legend.position = "bottom",
+    plot.caption = element_text(hjust = 1)
+  )
+```
+
+Weekend incidents have a higher average victim count than weekday incidents. Weekend incidents average `r round(weekend_victim_summary$average_victims_per_incident[weekend_victim_summary$weekend_status == "Weekend"], 2)` victims per incident, compared with `r round(weekend_victim_summary$average_victims_per_incident[weekend_victim_summary$weekend_status == "Weekday"], 2)` for weekday incidents. Weekend incidents also have a higher multi-victim incident share, which means the weekend pattern is not only about more incidents being recorded, but also about a somewhat higher concentration of incidents involving multiple victims.
+
+#### Supporting Calendar View for 2023
+
+The calendar view below focuses on daily incident counts in 2023. Unlike the month-weekday heatmap, which summarizes repeated patterns across the full dataset, this calendar shows day-level variation within one year. Darker days indicate higher numbers of recorded incidents.
+
+```{r}
+#| label: viz-2b-calendr-2023-calendar
+#| fig-width: 13
+#| fig-height: 8
+#| fig-dpi: 96
+#| out-width: "100%"
+
+# Create a complete sequence of dates for 2023.
+# This is necessary because calendR needs one numeric value for each day
+# when creating a yearly gradient calendar.
+
+all_2023_dates <- tibble(
+  date = seq.Date(
+    from = as.Date("2023-01-01"),
+    to = as.Date("2023-12-31"),
+    by = "day"
+  )
+)
+
+# Count incidents for each day in 2023 and fill days with no recorded incidents 
+# as 0.
+
+daily_2023_incidents <- gun_incidents |>
+  filter(year == 2023) |>
+  mutate(date = as.Date(date)) |>
+  count(date, name = "incident_count") |>
+  right_join(all_2023_dates, by = "date") |>
+  mutate(
+    incident_count = replace_na(incident_count, 0)
+  ) |>
+  arrange(date)
+
+daily_2023_summary <- daily_2023_incidents |>
+  summarise(
+    total_2023_incidents = sum(incident_count),
+    average_daily_incidents = mean(incident_count),
+    highest_daily_count = max(incident_count),
+    highest_daily_date = min(date[incident_count == highest_daily_count])
+  )
+
+# Store the daily counts as a vector for calendR.
+
+daily_incident_counts_2023 <- daily_2023_incidents |>
+  pull(incident_count)
+
+# Create a yearly calendar heatmap.
+# Short weekday names and a wider figure size are used to prevent label overlap.
+
+calendR::calendR(
+  year = 2023,
+  start = "M",
+  special.days = daily_incident_counts_2023,
+  gradient = TRUE,
+  low.col = "#F7FBFF",
+  special.col = "#08306B",
+  legend.pos = "bottom",
+  legend.title = "Daily incident count",
+  weeknames = c("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"),
+  text.size = 6,
+title.size = 18,
+subtitle.size = 12,
+  title = "Daily Gun Violence Incidents in 2023",
+  subtitle = "Darker days indicate higher recorded incident counts"
+)
+```
+
+In 2023, the dataset contains `r scales::comma(daily_2023_summary$total_2023_incidents)` recorded incidents, averaging about `r round(daily_2023_summary$average_daily_incidents, 1)` incidents per day. The highest daily count is `r scales::comma(daily_2023_summary$highest_daily_count)` incidents on `r format(daily_2023_summary$highest_daily_date, "%B %d, %Y")`. This daily view shows that the yearly total is not evenly spread across individual dates.
+
+### Visualization 4: Poverty Rate and Incident Rate Scatter Plot
+
+This scatter plot uses the joined `gun_county_year_rates_for_analysis` data summarized in the [table](#tbl-poverty-rate-summary) below. Each point represents one county/county-equivalent in the most recent analysis year within states covered by the incident data, including counties with zero recorded incidents. The x-axis is the county/county-equivalent poverty proportion from the Census data, and the y-axis is `incident_rate_per_100k`, or recorded gun violence incidents per 100,000 residents. Point transparency is used to reduce overlap among counties/county-equivalents.
+
+```{r}
+#| label: tbl-poverty-rate-summary
+#| tbl-cap: "County/county-equivalent poverty and incident rate summary for the most recent analysis year"
+
+# Use the most recent analysis year with available Census population and poverty data.
+# Counties/county-equivalents are split into higher- and lower-poverty groups based on the median
+# county/county-equivalent poverty rate for that year.
+
+latest_analysis_year <- max(gun_county_year_rates_for_analysis$year, na.rm = TRUE)
+
+poverty_incident_data <- gun_county_year_rates_for_analysis |>
+  filter(
+    year == latest_analysis_year,
+    !is.na(prop_poverty),
+    !is.na(incident_rate_per_100k)
+  )
+
+poverty_rate_summary <- poverty_incident_data |>
+  mutate(
+    poverty_group = if_else(
+      prop_poverty >= median(prop_poverty, na.rm = TRUE),
+      "Higher-poverty counties/equivalents",
+      "Lower-poverty counties/equivalents"
+    )
+  ) |>
+  group_by(poverty_group) |>
+  summarise(
+    counties = n(),
+    mean_poverty_rate = mean(prop_poverty, na.rm = TRUE),
+    mean_incident_rate = mean(incident_rate_per_100k, na.rm = TRUE),
+    median_incident_rate = median(incident_rate_per_100k, na.rm = TRUE),
+    sd_incident_rate = sd(incident_rate_per_100k, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+poverty_incident_model <- lm(incident_rate_per_100k ~ prop_poverty, data = poverty_incident_data)
+poverty_r_squared <- summary(poverty_incident_model)$r.squared
+
+poverty_rate_summary |>
+  gt() |>
+  fmt_percent(columns = mean_poverty_rate, decimals = 1) |>
+  fmt_number(
+    columns = c(mean_incident_rate, median_incident_rate, sd_incident_rate),
+    decimals = 2
+  ) |>
+  cols_label(
+    poverty_group = "Poverty Group",
+    counties = "Counties/Equivalents",
+    mean_poverty_rate = "Mean Poverty Rate",
+    mean_incident_rate = "Mean Incident Rate per 100,000 Residents",
+    median_incident_rate = "Median Incident Rate per 100,000 Residents",
+    sd_incident_rate = "SD Incident Rate"
+  ) |>
+  tab_header(title = "County/County-Equivalent Incident Rates by Poverty Group") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-4-poverty-rate-scatterplot
+
+# This scatter plot examines whether counties/county-equivalents with higher poverty rates also tend
+# to have higher population-adjusted incident rates. The alpha legend clarifies
+# that transparency is used for display purposes to reduce overlapping points.
+
+ggplot(
+  poverty_incident_data,
+  aes(
+    x = prop_poverty,
+    y = incident_rate_per_100k
+  )
+) +
+  geom_point(
+  alpha = 0.35,
+  size = 1.8,
+  color = "#2c3e50"
+) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1, color = "#3366AA") +
+  annotate(
+    "label",
+    x = Inf,
+    y = Inf,
+    hjust = 1.1,
+    vjust = 1.4,
+    label = paste0("R² = ", round(poverty_r_squared, 3)),
+    size = 4,
+    label.size = 0.25,
+    fill = "white"
+  ) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = paste("County Poverty Rate and Gun Violence Incident Rate in", latest_analysis_year),
+    subtitle = "County/county-equivalent points with fitted trend line",
+    x = "County/county-equivalent poverty rate",
+    y = "Gun violence incidents per 100,000 residents",
+    caption = "Data Source: Gun Violence Archive and U.S. Census county/county-equivalent data"
+  ) +
+  theme_grey(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    plot.caption = element_text(hjust = 1)
+  )
+```
+
+The fitted line shows a positive relationship between county poverty rate and incident rate in 2023. The R² value of `r round(poverty_r_squared, 3)` means poverty rate explains about `r scales::percent(poverty_r_squared, accuracy = 0.1)` of the variation in county/county-equivalent incident rates, so the relationship is positive but limited. Higher-poverty counties/county-equivalents averaged `r round(poverty_rate_summary$mean_incident_rate[poverty_rate_summary$poverty_group == "Higher-poverty counties/equivalents"], 2)` incidents per 100,000 residents, compared with `r round(poverty_rate_summary$mean_incident_rate[poverty_rate_summary$poverty_group == "Lower-poverty counties/equivalents"], 2)` among lower-poverty counties/county-equivalents. This suggests that poverty is associated with higher incident rates, although most of the variation is still explained by other factors not captured by this single-variable plot.
+
+### Visualization 5: Boxplots of Average State/Jurisdiction Incident Rates by Poverty Level
+
+This boxplot uses the `gun_state_year_rates` data summarized in the [table](#tbl-state-rates-by-poverty) below, but it first summarizes the data to one row per state or jurisdiction. This makes the comparison easier to interpret because each state/jurisdiction contributes once, rather than appearing once for every available year. The poverty groups are based on average poverty rate across the available population-adjusted years, and the y-axis shows the average incident rate per 100,000 residents.
+
+```{r}
+#| label: tbl-state-rates-by-poverty
+#| tbl-cap: "Summary statistics for average state/jurisdiction incident rates grouped by poverty level"
+
+# States/jurisdictions are summarized once across available analysis years.
+# The groups are then created from average poverty rate, so the boxplot compares
+# places rather than repeated state-year observations.
+
+state_poverty_box_data <- gun_state_year_rates |>
+  filter(
+    !is.na(prop_poverty),
+    !is.na(incident_rate_per_100k)
+  ) |>
+  group_by(state) |>
+  summarise(
+    average_incident_rate = mean(incident_rate_per_100k, na.rm = TRUE),
+    average_poverty_rate = mean(prop_poverty, na.rm = TRUE),
+    years_available = n_distinct(year),
+    .groups = "drop"
+  ) |>
+  mutate(
+    poverty_group_number = ntile(average_poverty_rate, 3),
+    poverty_group = case_when(
+      poverty_group_number == 1 ~ "Lower poverty",
+      poverty_group_number == 2 ~ "Middle poverty",
+      poverty_group_number == 3 ~ "Higher poverty"
+    ),
+    poverty_group = factor(
+      poverty_group,
+      levels = c("Lower poverty", "Middle poverty", "Higher poverty")
+    )
+  )
+
+boxplot_summary <- state_poverty_box_data |>
+  group_by(poverty_group) |>
+  summarise(
+    states_or_jurisdictions = n(),
+    mean_rate = mean(average_incident_rate, na.rm = TRUE),
+    median_rate = median(average_incident_rate, na.rm = TRUE),
+    mean_poverty_rate = mean(average_poverty_rate, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  left_join(
+    state_poverty_box_data |>
+      group_by(poverty_group) |>
+      summarise(
+        upper_whisker = boxplot.stats(average_incident_rate)$stats[5],
+        .groups = "drop"
+      ),
+    by = "poverty_group"
+  ) |>
+  mutate(
+    summary_label = paste0(
+      "n = ", states_or_jurisdictions,
+      "\nMean = ", round(mean_rate, 1),
+      "\nMedian = ", round(median_rate, 1)
+    ),
+    label_y = pmin(upper_whisker + 2, 38)
+  )
+
+boxplot_summary |>
+  select(poverty_group, states_or_jurisdictions, mean_poverty_rate, mean_rate, median_rate) |>
+  gt() |>
+  fmt_percent(
+    columns = mean_poverty_rate,
+    decimals = 1
+  ) |>
+  fmt_number(
+    columns = c(mean_rate, median_rate),
+    decimals = 2
+  ) |>
+  cols_label(
+    poverty_group = "Poverty Group",
+    states_or_jurisdictions = "States/Jurisdictions",
+    mean_poverty_rate = "Mean Poverty Rate",
+    mean_rate = "Mean Incident Rate per 100,000 Residents",
+    median_rate = "Median Incident Rate per 100,000 Residents"
+  ) |>
+  tab_header(title = "Average State/Jurisdiction Incident Rates by Poverty Group") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-6-boxplot-state-rates-by-poverty
+
+# The boxplots show the distribution of average state/jurisdiction incident
+# rates within each poverty group. Jittered points are included to show the
+# individual states/jurisdictions behind each distribution.
+
+ggplot(
+  state_poverty_box_data,
+  aes(
+    x = poverty_group,
+    y = average_incident_rate,
+    fill = poverty_group
+  )
+) +
+  geom_boxplot(
+    width = 0.55,
+    alpha = 0.75,
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    aes(color = poverty_group),
+    width = 0.12,
+    alpha = 0.45,
+    size = 1.8,
+    show.legend = FALSE
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3.5,
+    fill = "white"
+  ) +
+  geom_text(
+    data = boxplot_summary,
+    aes(
+      x = poverty_group,
+      y = label_y,
+      label = summary_label
+    ),
+    inherit.aes = FALSE,
+    size = 3.2,
+    lineheight = 0.9
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 40, 10),
+    expand = expansion(mult = c(0, 0.04))
+  ) +
+  coord_cartesian(ylim = c(0, 40)) +
+  scale_fill_viridis_d(option = "D", end = 0.85) +
+  scale_color_viridis_d(option = "D", end = 0.85) +
+  labs(
+    title = "Average Gun Violence Incident Rates by Poverty Level",
+    subtitle = "Each point represents one state summarized across population-adjusted years",
+    x = "Average poverty group",
+    y = "Average incidents per 100,000 residents",
+    caption = "Data Source: Gun Violence Archive and U.S. Census county/county-equivalent data"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "none",
+    plot.caption = element_text(hjust = 1),
+    plot.margin = margin(10, 25, 10, 10)
+  )
+```
+
+The boxplots show higher distributions of average incident rates as poverty level increases. The mean average incident rate rises from `r round(boxplot_summary$mean_rate[boxplot_summary$poverty_group == "Lower poverty"], 2)` incidents per 100,000 residents in the lower-poverty group to `r round(boxplot_summary$mean_rate[boxplot_summary$poverty_group == "Middle poverty"], 2)` in the middle-poverty group and `r round(boxplot_summary$mean_rate[boxplot_summary$poverty_group == "Higher poverty"], 2)` in the higher-poverty group. The median follows the same pattern, increasing from `r round(boxplot_summary$median_rate[boxplot_summary$poverty_group == "Lower poverty"], 2)` to `r round(boxplot_summary$median_rate[boxplot_summary$poverty_group == "Middle poverty"], 2)` and then `r round(boxplot_summary$median_rate[boxplot_summary$poverty_group == "Higher poverty"], 2)` incidents per 100,000 residents. Overall, the chart supports the same general pattern seen in the county/county-equivalent scatter plot: higher-poverty places tend to have higher population-adjusted incident rates, although this remains an association rather than proof of causation. The District of Columbia is retained as a jurisdiction, but it should be interpreted separately because it is a dense urban district rather than a state.
+
+### Visualization 6: Bar Chart of Additional Incident Contexts
+
+This bar chart uses the additional context extracted from `incident_characteristics`. The primary outcome labels, such as "Shot - Dead" and "Shot - Wounded/Injured," are removed because they describe the main incident outcome rather than additional context. The bars show how often each context appears, while the fill color shows the average number of victims per incident for that context.
+
+```{r}
+#| label: tbl-additional-incident-contexts
+#| tbl-cap: "Frequency and severity table for the most common additional incident context labels"
+
+# Separate semicolon-delimited additional context labels into separate rows.
+# Exclude primary outcome labels so the chart focuses only on additional context.
+# For each context, calculate both frequency and average victims per incident.
+
+primary_outcome_labels <- c(
+  "Shot - Dead (murder, accidental, or suicide)",
+  "Shot - Wounded/Injured"
+)
+
+common_incident_contexts <- gun_incidents |>
+  filter(!is.na(additional_incident_context)) |>
+  select(
+    incident_id,
+    additional_incident_context,
+    victims_total,
+    number_victims_killed,
+    number_victims_injured
+  ) |>
+  separate_rows(additional_incident_context, sep = ";\\s*") |>
+  mutate(
+    additional_incident_context = str_squish(additional_incident_context)
+  ) |>
+  filter(
+    additional_incident_context != "",
+    !additional_incident_context %in% primary_outcome_labels
+  ) |>
+  group_by(additional_incident_context) |>
+  summarise(
+    incident_count = n(),
+    average_victims_per_incident = mean(victims_total, na.rm = TRUE),
+    average_victims_killed = mean(number_victims_killed, na.rm = TRUE),
+    average_victims_injured = mean(number_victims_injured, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  slice_max(incident_count, n = 12) |>
+  arrange(incident_count) |>
+  mutate(
+    context_label = str_wrap(additional_incident_context, width = 32),
+    hover_text = paste0(
+      "<b>", additional_incident_context, "</b>",
+      "<br>Incident count: ", scales::comma(incident_count),
+      "<br>Average victims per incident: ", round(average_victims_per_incident, 2),
+      "<br>Average victims killed: ", round(average_victims_killed, 2),
+      "<br>Average victims injured: ", round(average_victims_injured, 2)
+    )
+  )
+
+top_incident_context <- common_incident_contexts |>
+  arrange(desc(incident_count)) |>
+  slice(1)
+
+top_five_context_labels <- common_incident_contexts |>
+  arrange(desc(incident_count)) |>
+  slice_head(n = 5) |>
+  pull(additional_incident_context) |>
+  str_c(collapse = ", ")
+
+common_incident_contexts |>
+  arrange(desc(incident_count)) |>
+  select(
+    additional_incident_context,
+    incident_count,
+    average_victims_per_incident,
+    average_victims_killed,
+    average_victims_injured
+  ) |>
+  gt() |>
+  fmt_number(
+    columns = c(
+      average_victims_per_incident,
+      average_victims_killed,
+      average_victims_injured
+    ),
+    decimals = 2
+  ) |>
+  cols_label(
+    additional_incident_context = "Additional Incident Context",
+    incident_count = "Incident Count",
+    average_victims_per_incident = "Average Victims per Incident",
+    average_victims_killed = "Average Victims Killed",
+    average_victims_injured = "Average Victims Injured"
+  ) |>
+  tab_header(title = "Most Common Additional Incident Contexts") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-7-additional-incident-context-bar-chart
+#| fig-width: 10
+#| fig-height: 6
+
+# The x-axis shows how many times each additional context appears.
+# Fill color represents average victims per incident, adding a severity layer
+# to the frequency comparison.
+
+additional_context_bar_plot <- ggplot(
+  common_incident_contexts,
+  aes(
+    x = incident_count,
+    y = reorder(context_label, incident_count),
+    fill = average_victims_per_incident,
+    text = hover_text
+  )
+) +
+  geom_col() +
+  scale_fill_viridis_c(option = "C") +
+  scale_x_continuous(
+    labels = scales::comma,
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  labs(
+    title = "Most Common Additional Incident Contexts",
+    subtitle = "Bars show frequency; color shows average victims per incident",
+    x = "Number of incidents",
+    y = "Additional incident context",
+    fill = "Average victims\nper incident",
+    caption = "Data Source: Gun Violence Archive"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(size = 8),
+    legend.position = "right",
+    plot.caption = element_text(hjust = 1),
+    plot.margin = margin(5.5, 55, 26, 28)
+  )
+
+plotly::ggplotly(
+  additional_context_bar_plot,
+  tooltip = "text"
+) |>
+  plotly::layout(
+    margin = list(l = 170, r = 90, t = 80, b = 70)
+  )
+```
+
+`r top_incident_context$additional_incident_context` is the most common additional context in the data, appearing in `r scales::comma(top_incident_context$incident_count)` records. The five most common context labels in this chart are `r top_five_context_labels`. The color scale adds severity context by showing average victims per incident, so the chart compares both how often each context appears and how severe those incidents tend to be.
+
+### Visualization 7: Michigan Area Concentration Analysis
+
+The Michigan-focused analysis examines whether recorded gun violence incidents are evenly distributed across the state or concentrated in a few areas. I compare Detroit, Flint, Grand Rapids, and all other Michigan areas with recorded city/place names. The incident counts come from the gun violence file's `city` column. The population values are manually added 2020 Census context values, not exact city-year rate denominators, because the project Census file provides county/county-equivalent population data rather than city-level population by year.
+
+```{r}
+#| label: tbl-michigan-city-group-summary
+#| tbl-cap: "Michigan area-group incident shares compared with 2020 population context"
+
+# This table summarizes Michigan incident concentration by area group.
+# The incident share shows each group's percentage of all Michigan incidents
+# with recorded city/place names. The population share uses 2020 Census population
+# values as context for comparing incident concentration with population size.
+
+michigan_population_context <- tibble(
+  city_group = c(
+    "Detroit",
+    "Flint",
+    "Grand Rapids",
+    "All other Michigan areas"
+  ),
+  population_2020 = c(
+    639111,
+    81252,
+    198917,
+    10077331 - 639111 - 81252 - 198917
+  )
+) |>
+  mutate(
+    population_share = population_2020 / 10077331
+  )
+
+michigan_city_recording_summary <- gun_incidents |>
+  filter(state == "Michigan") |>
+  summarise(
+    total_michigan_records = n(),
+    records_with_city = sum(!is.na(city) & city != ""),
+    records_without_city = total_michigan_records - records_with_city,
+    percent_without_city = records_without_city / total_michigan_records
+  )
+
+michigan_city_concentration <- gun_incidents |>
+  filter(
+    state == "Michigan",
+    !is.na(city),
+    city != ""
+  ) |>
+  mutate(
+    city_group = case_when(
+      city == "Detroit" ~ "Detroit",
+      city == "Flint" ~ "Flint",
+      city == "Grand Rapids" ~ "Grand Rapids",
+      TRUE ~ "All other Michigan areas"
+    ),
+    city_group = factor(
+      city_group,
+      levels = c(
+        "Detroit",
+        "Flint",
+        "Grand Rapids",
+        "All other Michigan areas"
+      )
+    )
+  ) |>
+  count(year, city_group, name = "incident_count") |>
+  group_by(year) |>
+  mutate(
+    yearly_michigan_incidents = sum(incident_count),
+    yearly_incident_share = incident_count / yearly_michigan_incidents
+  ) |>
+  ungroup() |>
+  group_by(city_group) |>
+  mutate(
+    total_group_incidents = sum(incident_count)
+  ) |>
+  ungroup() |>
+  mutate(
+    total_michigan_incidents = sum(incident_count),
+    overall_incident_share = total_group_incidents / total_michigan_incidents
+  ) |>
+  left_join(
+    michigan_population_context,
+    by = "city_group"
+  ) |>
+  mutate(
+    incident_population_ratio = overall_incident_share / population_share,
+    hover_text = paste0(
+      "<b>", city_group, "</b>",
+      "<br>Year: ", year,
+      "<br>Incidents in year: ", scales::comma(incident_count),
+      "<br>Share of Michigan incidents in year: ",
+      scales::percent(yearly_incident_share, accuracy = 0.1),
+      "<br>Total incidents across all years: ",
+      scales::comma(total_group_incidents),
+      "<br>Overall share of Michigan incidents: ",
+      scales::percent(overall_incident_share, accuracy = 0.1),
+      "<br>2020 population context: ",
+      scales::comma(population_2020),
+      "<br>Share of Michigan 2020 population: ",
+      scales::percent(population_share, accuracy = 0.1)
+    )
+  )
+
+michigan_city_group_summary <- michigan_city_concentration |>
+  distinct(
+    city_group,
+    total_group_incidents,
+    overall_incident_share,
+    population_2020,
+    population_share,
+    incident_population_ratio
+  ) |>
+  arrange(desc(overall_incident_share))
+
+detroit_michigan_summary <- michigan_city_group_summary |>
+  filter(city_group == "Detroit")
+
+three_city_michigan_summary <- michigan_city_group_summary |>
+  filter(city_group %in% c("Detroit", "Flint", "Grand Rapids")) |>
+  summarise(
+    three_city_incident_share = sum(overall_incident_share),
+    three_city_population_share = sum(population_share),
+    three_city_incident_population_ratio =
+      three_city_incident_share / three_city_population_share
+  )
+
+michigan_city_group_summary |>
+  gt() |>
+  fmt_number(
+    columns = c(total_group_incidents, population_2020),
+    decimals = 0,
+    use_seps = TRUE
+  ) |>
+  fmt_percent(
+    columns = c(overall_incident_share, population_share),
+    decimals = 1
+  ) |>
+  fmt_number(
+    columns = incident_population_ratio,
+    decimals = 2
+  ) |>
+  cols_label(
+    city_group = "Area Group",
+    total_group_incidents = "Recorded Incidents",
+    overall_incident_share = "Share of Michigan Incidents",
+    population_2020 = "2020 Population Context",
+    population_share = "Share of Michigan Population",
+    incident_population_ratio = "Incident Share / Population Share"
+  ) |>
+  tab_header(
+    title = "Michigan Incident Concentration by Area Group"
+  ) |>
+  gt_theme_espn()
+```
+
+The following interactive chart shows how each area group contributes to Michigan’s recorded incidents by year. Each bar sums to 100%, so the visualization emphasizes the yearly distribution of incidents rather than the raw number of incidents.
+
+```{r}
+#| label: viz-8-michigan-city-concentration-plotly
+
+# This 100% stacked bar chart uses the Michigan area-group dataset created above.
+# The y-axis shows each group's share of Michigan incidents for that year.
+# Hover text provides yearly incident share, total incident share, and 
+# population context.
+
+michigan_city_concentration_plot <- ggplot(
+  michigan_city_concentration,
+  aes(
+    x = year,
+    y = yearly_incident_share,
+    fill = city_group,
+    text = hover_text
+  )
+) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(
+    breaks = sort(unique(michigan_city_concentration$year))
+  ) +
+  scale_fill_viridis_d(option = "D", end = 0.85) +
+  labs(
+    title = "Share of Michigan Gun Violence Incidents by Area Group",
+    subtitle = "Detroit, Flint, and Grand Rapids are compared with all other Michigan areas",
+    x = NULL,
+    y = "Share of Michigan incidents",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+plotly::ggplotly(
+  michigan_city_concentration_plot,
+  tooltip = "text"
+) |>
+  plotly::layout(
+    legend = list(
+      orientation = "h",
+      x = 0.5,
+      xanchor = "center",
+      y = -0.25,
+      title = list(text = "")
+    ),
+    margin = list(l = 70, r = 30, t = 80, b = 130),
+    annotations = list(
+      list(
+        text = "Data Source: Gun Violence Archive; 2020 population context from U.S. Decennial Census",
+        x = 1,
+        y = -0.35,
+        xref = "paper",
+        yref = "paper",
+        showarrow = FALSE,
+        xanchor = "right",
+        yanchor = "top",
+        font = list(size = 11)
+      )
+    )
+  )
+```
+
+Michigan incidents are strongly concentrated in a small number of areas. Detroit alone accounts for `r scales::percent(detroit_michigan_summary$overall_incident_share, accuracy = 0.1)` of Michigan incidents with recorded city/place names, and Detroit, Flint, and Grand Rapids together account for `r scales::percent(three_city_michigan_summary$three_city_incident_share, accuracy = 0.1)`. By comparison, those three cities make up about `r scales::percent(three_city_michigan_summary$three_city_population_share, accuracy = 0.1)` of Michigan's 2020 population. Their incident share is therefore about `r round(three_city_michigan_summary$three_city_incident_population_ratio, 1)` times their population share, showing that Michigan's recorded incidents are not evenly distributed across areas. This analysis uses Michigan incidents with recorded city/place names; `r scales::comma(michigan_city_recording_summary$records_without_city)` Michigan records, or `r scales::percent(michigan_city_recording_summary$percent_without_city, accuracy = 0.1)`, do not have a recorded city/place name. If those missing records are concentrated in a particular city or area, the exact area shares could shift, so the Michigan comparison should be interpreted as a concentration analysis among records with usable city/place information.
+
+### Visualization 8: Interactive Plotly Incident Location Map
+
+The interactive map displays incident-level locations for the most recent year in the dataset. Each point represents an incident with available latitude and longitude, and the hover text reports location and victim details. Because these are raw incident locations, the map is best interpreted as an exploratory spatial display. Population-adjusted state and county/county-equivalent visuals above should be used for formal geographic comparisons.
+
+```{r}
+#| label: tbl-interactive-plotly-map-summary
+#| tbl-cap: "Summary of incident records used in the interactive Plotly map"
+#| cache: false
+
+# Use the most recent year for the interactive map. Marker size reflects total
+# victims, while color separates incidents with and without victim deaths.
+
+latest_map_year <- max(gun_incidents$year, na.rm = TRUE)
+
+gun_map_data <- gun_incidents |>
+  filter(
+    year == latest_map_year,
+    !is.na(latitude),
+    !is.na(longitude)
+  ) |>
+  mutate(
+    victims_total_for_map = if_else(victims_total == 0, 1, victims_total),
+    marker_size = pmin(victims_total_for_map + 3, 12),
+    victim_fatal_status = if_else(number_victims_killed > 0, "Victim-fatal incident", "No victim death recorded"),
+    place_name = case_when(
+      !is.na(business_or_school) & business_or_school != "" ~ business_or_school,
+      !is.na(address) & address != "" ~ address,
+      TRUE ~ str_c(city, ", ", state)
+    ),
+    hover_text = paste0(
+      "<b>", place_name, "</b>",
+      "<br><b>City:</b> ", city,
+      "<br><b>County:</b> ", county,
+      "<br><b>State:</b> ", state,
+      "<br><b>Date:</b> ", date,
+      "<br><b>Victims killed:</b> ", number_victims_killed,
+      "<br><b>Victims injured:</b> ", number_victims_injured,
+      "<br><b>Total victims:</b> ", victims_total,
+      "<br><b>Incident type:</b> ", victim_fatal_status
+    )
+  )
+
+gun_map_summary <- gun_map_data |>
+  summarise(
+    map_year = first(latest_map_year),
+    mapped_incidents = n(),
+    total_victims_mapped = sum(victims_total, na.rm = TRUE),
+    average_victims_per_incident = mean(victims_total, na.rm = TRUE)
+  )
+
+gun_map_summary |>
+  gt() |>
+  fmt_number(columns = average_victims_per_incident, decimals = 2) |>
+  cols_label(
+    map_year = "Map Year",
+    mapped_incidents = "Mapped Incidents",
+    total_victims_mapped = "Total Victims Mapped",
+    average_victims_per_incident = "Average Victims per Incident"
+  ) |>
+  tab_header(title = "Interactive Plotly Map Data Summary") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: viz-9-interactive-plotly-usa-map
+#| cache: false
+
+plotly::plot_geo(
+  data = gun_map_data,
+  lat = ~latitude,
+  lon = ~longitude,
+  type = "scattergeo",
+  mode = "markers",
+  split = ~victim_fatal_status,
+  text = ~hover_text,
+  hoverinfo = "text",
+  marker = list(
+    size = ~marker_size,
+    opacity = 0.5,
+    line = list(width = 0)
+  )
+) |>
+  plotly::layout(
+    title = list(
+      text = paste0(
+        "Interactive Map of Gun Violence Incidents in ",
+        latest_map_year,
+        "<br><sup>Point size reflects total victims; color separates incidents with and without victim deaths</sup>"
+      ),
+      x = 0.02
+    ),
+    geo = list(
+      scope = "usa",
+      projection = list(type = "albers usa"),
+      showland = TRUE,
+      landcolor = "rgb(248, 248, 248)",
+      subunitcolor = "rgb(210, 210, 210)",
+      countrycolor = "rgb(210, 210, 210)",
+      lakecolor = "rgb(255, 255, 255)",
+      showlakes = TRUE
+    ),
+    legend = list(
+      title = list(text = "Victim Death Status"),
+      orientation = "h",
+      x = 0.02,
+      y = -0.05
+    ),
+    annotations = list(
+      list(
+        text = "Data Source: Gun Violence Archive",
+        x = 1,
+        y = -0.12,
+        xref = "paper",
+        yref = "paper",
+        showarrow = FALSE,
+        xanchor = "right",
+        font = list(size = 11)
+      )
+    ),
+    margin = list(l = 0, r = 0, t = 80, b = 60)
+  )
+```
+
+The interactive map contains `r scales::comma(gun_map_summary$mapped_incidents)` mapped incidents for `r gun_map_summary$map_year`, with `r scales::comma(gun_map_summary$total_victims_mapped)` total victims represented. The mapped points cluster around major metropolitan areas such as Chicago, Philadelphia, Milwaukee, Houston, Los Angeles, Washington, D.C., Memphis, Baltimore, New Orleans, and Atlanta. Because the map displays raw incident locations, it is best used for spatial exploration rather than population-adjusted comparison.
+
+# Permutation or Randomization Test
+
+To add formal inference, the permutation test evaluates whether counties/county-equivalents with higher poverty rates have higher population-adjusted gun violence incident rates in the most recent analysis year.
+
+**Null hypothesis:** The mean gun violence incident rate is the same for higher-poverty and lower-poverty counties/county-equivalents.
+
+**Alternative hypothesis:** Higher-poverty counties/county-equivalents have a higher mean gun violence incident rate than lower-poverty counties/county-equivalents.
+
+```{r}
+#| label: prepare-permutation-test-data
+
+# The test compares the mean incident_rate_per_100k for counties/county-equivalents
+# above and below the median poverty rate in the most recent analysis year.
+
+permutation_data <- gun_county_year_rates_for_analysis |>
+  filter(
+    year == latest_analysis_year,
+    !is.na(prop_poverty),
+    !is.na(incident_rate_per_100k)
+  ) |>
+  mutate(
+    poverty_group = if_else(
+      prop_poverty >= median(prop_poverty, na.rm = TRUE),
+      "Higher-poverty counties/equivalents",
+      "Lower-poverty counties/equivalents"
+    )
+  )
+
+calculate_difference <- function(outcome, group) {
+  mean(outcome[group == "Higher-poverty counties/equivalents"], na.rm = TRUE) -
+    mean(outcome[group == "Lower-poverty counties/equivalents"], na.rm = TRUE)
+}
+
+observed_difference <- calculate_difference(
+  permutation_data$incident_rate_per_100k,
+  permutation_data$poverty_group
+)
+
+set.seed(1994)
+n_permutations <- 1000
+
+null_distribution <- tibble(
+  permutation = 1:n_permutations,
+  difference = map_dbl(
+    permutation,
+    ~ calculate_difference(
+      permutation_data$incident_rate_per_100k,
+      sample(permutation_data$poverty_group)
+    )
+  )
+)
+
+# A plus-one correction prevents reporting a simulated p-value of exactly zero.
+# This is appropriate when none of the simulated differences are as large as the
+# observed difference.
+
+p_value <- (sum(null_distribution$difference >= observed_difference) + 1) /
+  (n_permutations + 1)
+
+significance_cutoff <- quantile(null_distribution$difference, 0.95)
+```
+
+```{r}
+#| label: tbl-permutation-test-summary
+#| tbl-cap: "Permutation test comparing county/county-equivalent incident rates by poverty group"
+
+permutation_results <- tibble(
+  test_year = latest_analysis_year,
+  observed_difference = observed_difference,
+  p_value = p_value,
+  significance_cutoff = as.numeric(significance_cutoff),
+  permutations = n_permutations
+)
+
+permutation_results |>
+  gt() |>
+  fmt_number(
+    columns = c(observed_difference, p_value, significance_cutoff),
+    decimals = 4
+  ) |>
+  cols_label(
+    test_year = "Test Year",
+    observed_difference = "Observed Difference",
+    p_value = "Permutation p-value",
+    significance_cutoff = "95% Null Cutoff",
+    permutations = "Permutations"
+  ) |>
+  tab_header(title = "Permutation Test Summary") |>
+  gt_theme_nytimes()
+```
+
+```{r}
+#| label: permutation-test-null-distribution
+
+# The histogram represents the null distribution obtained by randomly permuting
+# poverty group labels. The solid vertical line is the observed difference, and
+# the dashed vertical line is the 95th percentile of the null distribution.
+
+ggplot(null_distribution, aes(x = difference)) +
+  geom_histogram(bins = 35, color = "white") +
+  geom_vline(
+    xintercept = observed_difference,
+    linewidth = 1,
+    linetype = "solid",
+    color = "#D55E00"
+  ) +
+  geom_vline(
+    xintercept = significance_cutoff,
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  annotate(
+    "label",
+    x = observed_difference,
+    y = Inf,
+    hjust = 1.05,
+    vjust = 1.2,
+    label = paste0("Observed difference\n", round(observed_difference, 2)),
+    color = "#D55E00",
+    fill = "white",
+    label.size = 0.25,
+    size = 3.5
+  ) +
+  labs(
+    title = "Null Distribution for the County Poverty Group Permutation Test",
+    subtitle = "Orange line = observed difference; dashed line = 95% null cutoff",
+    x = "Difference in mean incident rates per 100,000 residents",
+    y = "Number of permutations",
+    caption = "Data Source: Gun Violence Archive and U.S. Census county/county-equivalent data"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 1)
+  )
+```
+
+The observed difference in mean incident rates is `r round(observed_difference, 3)` incidents per 100,000 residents. The permutation p-value is `r round(p_value, 4)`, which is below the 0.05 significance level. Therefore, I reject the null hypothesis. Statistically, this means that the observed difference is larger than would be expected if county poverty-group labels were randomly assigned. In context, the test provides evidence that higher-poverty counties/county-equivalents have a higher mean population-adjusted incident rate than lower-poverty counties/county-equivalents in the selected year.
+
+# Conclusions / Main Takeaways
+
+The analysis shows the data from several perspectives: time, geography, calendar patterns, poverty context, incident context, and a focused Michigan view. State and county/county-equivalent comparisons use population-adjusted rates rather than raw totals because raw totals can make larger places appear more affected simply because they have more people. The results show that several high-rate states have persistently elevated incident rates, incidents are more common on weekends and in warmer months, county/county-equivalent poverty rate has a positive but limited relationship with incident rate, and Michigan incidents are strongly concentrated in Detroit, Flint, and Grand Rapids relative to their population share. The interactive Plotly map is useful for exploring incident locations, but the state and county/county-equivalent rate charts are more appropriate for formal geographic comparisons.
+
+## Future Directions / Areas of Interest
+
+The findings suggest several follow-up directions. First, the population-adjusted rate analysis could be expanded by incorporating additional demographic or economic variables. Second, the Michigan-focused analysis could be developed further using city-level population data across multiple years, which would allow incident rates to be calculated more directly at the city level. Finally, the permutation test provides a framework for moving beyond visualization by formally testing whether observed group differences are larger than would be expected under random assignment. I am particularly interested in exploring city-to-state crime ratios further, as the Michigan analysis raised an intriguing pattern: a single city can account for a disproportionately large share of incidents compared with the rest of the state.
