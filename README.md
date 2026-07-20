@@ -2,8 +2,10 @@
 
 A reproducible R/Quarto data analysis project examining U.S. gun violence incident patterns, county-level socioeconomic conditions, geographic concentration, temporal trends, and population-adjusted incident rates.
 
-> **Project status:** Recruiter-facing portfolio analysis project. This current version presents the completed R/Quarto analysis; it may later serve as a stepping stone for a broader research and dashboard project.
+## View Project
 
+- [View rendered report](https://yourusername.github.io/repo-name/)
+- [View source code](./Gun%20Violence.qmd)
 ---
 
 ## Project Overview
