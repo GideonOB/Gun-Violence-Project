@@ -2,7 +2,7 @@
 
 A reproducible R/Quarto data analysis project examining U.S. gun violence incident patterns, county-level socioeconomic conditions, geographic concentration, temporal trends, and population-adjusted incident rates.
 
-> **Project status:** Portfolio-ready analysis project. A dashboard and expanded research version are planned for development by December 2026.
+> **Project status:** Recruiter-facing portfolio analysis project. This current version presents the completed R/Quarto analysis; it may later serve as a stepping stone for a broader research and dashboard project.
 
 ---
 
@@ -10,7 +10,7 @@ A reproducible R/Quarto data analysis project examining U.S. gun violence incide
 
 This project analyzes U.S. gun violence incident data alongside county/county-equivalent Census socioeconomic data to better understand where incidents are concentrated, how incident rates change over time, and how population-adjusted firearm incident rates relate to county-level poverty.
 
-The analysis began as a classroom final project and is being developed into a broader independent research project focused on firearm violence analytics, socioeconomic context, geographic concentration, and reproducible public-safety data reporting.
+The analysis began as a classroom final project and is currently presented as a recruiter-facing portfolio project. It may later serve as the foundation for a broader research and dashboard project focused on firearm violence analytics, socioeconomic context, geographic concentration, and reproducible public-safety data reporting.
 
 The project uses R and Quarto to clean, join, analyze, visualize, and report the data in a transparent and reproducible format.
 
@@ -148,12 +148,7 @@ The project currently includes:
 - a Michigan-focused concentration analysis;
 - a permutation/randomization test.
 
-Planned future outputs:
-
-- interactive dashboard;
-- expanded research report;
-- cleaned and modularized analysis scripts;
-- presentation or poster version for research/portfolio use.
+This repository represents the current portfolio version of the project. The work may later be used as a stepping stone for a broader research and dashboard project, but the materials in this repository should be read as the completed current-stage analysis.
 
 ---
 
@@ -234,16 +229,9 @@ Additional limitations include:
 
 ---
 
-## Future Work
+## Possible Future Direction
 
-Future development will focus on expanding the project from a static report into a more complete public-safety analytics product. Planned next steps include:
-
-- building an interactive dashboard by December 2026;
-- expanding the statistical modeling beyond bivariate relationships;
-- adding more socioeconomic and demographic variables;
-- improving city-level analysis with city-year population denominators;
-- modularizing the code into separate cleaning, modeling, and reporting scripts;
-- preparing a research-style report or publication based on the expanded analysis.
+This current repository is intended to present the completed portfolio version of the analysis. The project may later serve as a stepping stone for a broader research and dashboard project, but this README focuses on the current R/Quarto analysis rather than future deliverables.
 
 ---
 
