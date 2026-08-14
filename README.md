@@ -243,8 +243,8 @@ This current repository is intended to present the completed portfolio version o
 Master's Student, Data Science and Analytics  
 Grand Valley State University
 
-Professional website: [](https://gideonob.github.io/)  
-GitHub: [](https://github.com/GideonOB)
+[Professional website](https://gideonob.github.io/)  
+[LinkedIn page](https://www.linkedin.com/in/gideon-osei-bonsu-197a1916a/)
 
 ---
 
