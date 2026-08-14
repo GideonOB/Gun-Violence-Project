@@ -243,8 +243,8 @@ This current repository is intended to present the completed portfolio version o
 Master's Student, Data Science and Analytics  
 Grand Valley State University
 
-Professional website: `Add your website link here`  
-GitHub: `Add your GitHub profile link here`
+Professional website: [](https://gideonob.github.io/)  
+GitHub: [](https://github.com/GideonOB)
 
 ---
 
