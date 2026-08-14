@@ -4,7 +4,7 @@ A reproducible R/Quarto data analysis project examining U.S. gun violence incide
 
 ## View Project
 
-- [View rendered report](https://yourusername.github.io/repo-name/)
+- [View rendered report](https://gideonob.github.io/Gun-Violence-Project/)
 - [View source code](./Gun%20Violence.qmd)
 ---
 
